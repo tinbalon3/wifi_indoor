@@ -224,7 +224,7 @@ def main():
     with open('test_samples.json', 'r') as f:
         test_samples = json.load(f)
     
-    results = evaluate_predictions(system, test_samples)
+    results = evaluate_predictions(system, test_samples,k=1,distance_threshold=10.0)
 
 if __name__ == "__main__":
     main() 
