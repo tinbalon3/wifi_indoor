@@ -10,9 +10,9 @@ df = pd.read_csv('data.csv')
 X = df.drop('label', axis=1)
 y = df['label']
 
-# Tách dữ liệu thành train/test (test 300 mẫu)
+# Chia dữ liệu thành tập train và test
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=300, random_state=42, stratify=y if len(y.unique()) > 1 else None)
+    X, y, test_size=0.2, random_state=42, stratify=y if len(y.unique()) > 1 else None)  # 20% cho test set
 
 print(f"Số lượng mẫu huấn luyện: {len(X_train)}")
 print(f"Số lượng mẫu test: {len(X_test)}")

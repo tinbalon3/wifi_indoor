@@ -7,38 +7,87 @@ from collections import Counter
 
 class IndoorLocationSystem:
     def __init__(self, collection_name="indoor_locations"):
-        self.client = QdrantClient("localhost", port=6333)
         self.collection_name = collection_name
+        self.client = QdrantClient("localhost", port=6333)
+        self.num_beacons = None
+        self.beacon_order = None  # Store beacon order from training data
         self.setup_collection()
-        self.beacon_order = [
-            "E2:19:18:C3:B9:B8",
-            "C6:21:3B:AE:36:45",
-            "C0:23:61:37:E1:2A",
-            "C2:5B:0A:92:20:41",
-            "E8:94:83:95:61:E3",
-            "C3:79:28:8C:7B:D7"
-        ]
         
     def setup_collection(self):
+        """Setup collection for storing location data"""
         collections = self.client.get_collections().collections
         collection_names = [collection.name for collection in collections]
         
         if self.collection_name not in collection_names:
+            # Create collection with default size, will be updated when data is added
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=6, distance=Distance.COSINE)
+                vectors_config=VectorParams(size=10, distance=Distance.COSINE)  # Default size
             )
             
+    def create_collection(self):
+        """Create a new collection with correct vector size"""
+        # Delete collection if it exists
+        try:
+            self.client.delete_collection(collection_name=self.collection_name)
+        except:
+            pass
+            
+        # Create new collection with correct size
+        if not self.num_beacons:
+            raise ValueError("Vector dimension must be set before creating collection")
+            
+        self.client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=VectorParams(size=self.num_beacons, distance=Distance.COSINE)
+        )
+        print(f"Created collection with vector size: {self.num_beacons}")
+        
     def load_processed_data(self, processed_file):
         """Load dữ liệu đã xử lý từ file JSON"""
         with open(processed_file, 'r') as f:
             data = json.load(f)
+            
+        # Get vector dimension from data
+        if len(data['X_scaled']) > 0:
+            self.num_beacons = len(data['X_scaled'][0])
+        else:
+            raise ValueError("No data found in processed file")
+            
+        # Get beacon order from data
+        if 'beacon_order' in data:
+            self.beacon_order = data['beacon_order']
+        else:
+            # If no beacon_order in data, use default order from test data
+            self.beacon_order = [
+                "C6:21:3B:AE:36:45",
+                "E2:19:18:C3:B9:B8",
+                "F8:0F:43:E2:80:45",
+                "C2:5B:0A:92:20:41",
+                "C3:79:28:8C:7B:D7",
+                "EA:67:8D:31:27:71",
+                "E6:61:40:67:01:E5",
+                "CE:88:10:2C:58:A2",
+                "C0:23:61:37:E1:2A",
+                "E8:94:83:95:61:E3"
+            ]
+            
         return data['X_scaled'], data['y']
         
     def upload_to_qdrant(self, X_scaled, y):
         """Upload dữ liệu đã chuẩn hóa vào Qdrant"""
+        if not self.beacon_order:
+            raise ValueError("Beacon order must be set before uploading data")
+            
+        if not self.num_beacons:
+            raise ValueError("Vector dimension must be set before uploading data")
+            
+        # Create collection with correct size
+        self.create_collection()
+        
         points = []
         for i, (vector, label) in enumerate(zip(X_scaled, y)):
+            # Vector is already in correct order
             points.append(PointStruct(
                 id=i,
                 vector=vector,
@@ -46,98 +95,101 @@ class IndoorLocationSystem:
                     "label": str(label)
                 }
             ))
-        
+            
         self.client.upsert(
             collection_name=self.collection_name,
             points=points
         )
         print(f"Uploaded {len(points)} points to Qdrant")
+        print(f"Using beacon order: {self.beacon_order}")
+        print(f"Vector dimension: {self.num_beacons}")
         
-    def predict_location(self, current_rssi_data, k=5, distance_threshold=10.0):
-        """
-        Dự đoán vị trí dựa trên dữ liệu RSSI hiện tại
-        
-        Args:
-            current_rssi_data (dict): Dictionary chứa RSSI của các beacon
-            k (int): Số lượng neighbors cho KNN
-            distance_threshold (float): Ngưỡng khoảng cách tối đa
+    def add_location_data(self, data):
+        """Add location data to the collection"""
+        # Determine number of beacons from data
+        if self.num_beacons is None:
+            # Get the first row's RSSI values to determine number of beacons
+            first_row = data.iloc[0]
+            rssi_columns = [col for col in first_row.index if col.startswith('RSSI')]
+            self.num_beacons = len(rssi_columns)
             
-        Returns:
-            tuple: (predicted_label, confidence, distances)
-        """
-        # Chuyển đổi dữ liệu RSSI thành vector
-        query_vector = []
-        for beacon in self.beacon_order:
-            if beacon in current_rssi_data:
-                query_vector.append(current_rssi_data[beacon])
-            else:
-                query_vector.append(-100)  # Giá trị mặc định cho beacon thiếu
-                
-        # Tìm k neighbors gần nhất
-        search_result = self.client.query_points(
+            # Create collection with correct vector size
+            self.create_collection()
+            
+        points = []
+        for idx, row in data.iterrows():
+            # Get all RSSI values
+            rssi_values = [row[col] for col in data.columns if col.startswith('RSSI')]
+            point = PointStruct(
+                id=idx,
+                vector=rssi_values,
+                payload={"label": row["Label"]}
+            )
+            points.append(point)
+            
+        self.client.upsert(
             collection_name=self.collection_name,
-            query=query_vector,
+            points=points
+        )
+        
+    def predict_location(self, rssi_values, k=1, distance_threshold=5.0):
+        """Predict location based on RSSI values"""
+        if not self.beacon_order:
+            raise ValueError("Beacon order must be set before prediction")
+            
+        if len(rssi_values) != self.num_beacons:
+            raise ValueError(f"Expected {self.num_beacons} RSSI values, got {len(rssi_values)}")
+            
+        # Query the collection
+        search_result = self.client.search(
+            collection_name=self.collection_name,
+            query_vector=rssi_values,
             limit=k
         )
         
-        # Lọc kết quả theo ngưỡng khoảng cách
-        valid_results = [r for r in search_result.points if r.score <= distance_threshold]
+        if not search_result:
+            return None, 0.0, []
+            
+        # Get distances and labels
+        distances = [hit.score for hit in search_result]
+        labels = [hit.payload["label"] for hit in search_result]
         
-        # Nếu không có kết quả nào thỏa mãn điều kiện khoảng cách,
-        # sử dụng kết quả gần nhất
-        if not valid_results and search_result.points:
-            valid_results = [search_result.points[0]]
+        # Check if any distance is below threshold
+        if min(distances) > distance_threshold:
+            return None, 0.0, distances
             
-        if not valid_results:
-            return None, 0, []
-            
-        # Tính trọng số cho mỗi kết quả dựa trên khoảng cách
-        weights = {}
-        min_distances = {}  # Lưu khoảng cách nhỏ nhất cho mỗi label
-        for result in valid_results:
-            label = result.payload['label']
-            distance = result.score
-            
-            # Thêm epsilon nhỏ để tránh chia cho 0
+        # Calculate weighted prediction
+        total_weight = 0
+        weighted_label = 0
+        
+        for distance, label in zip(distances, labels):
             weight = 1.0 / (distance + 1e-10)
-            weights[label] = weights.get(label, 0) + weight
+            total_weight += weight
+            weighted_label += weight * int(label)
             
-            # Cập nhật khoảng cách nhỏ nhất cho label
-            if label not in min_distances or distance < min_distances[label]:
-                min_distances[label] = distance
-            
-        # Tìm label có tổng trọng số cao nhất
-        max_weight = max(weights.values())
-        most_common_labels = [label for label, weight in weights.items() 
-                            if weight == max_weight]
-        
-        # Nếu có nhiều label có cùng trọng số cao nhất,
-        # chọn label có khoảng cách nhỏ nhất
-        if len(most_common_labels) > 1:
-            predicted_label = min(most_common_labels, key=lambda x: min_distances[x])
-        else:
-            predicted_label = most_common_labels[0]
-        
-        # Tính độ tin cậy dựa trên tỷ lệ trọng số
-        total_weight = sum(weights.values())
-        confidence = weights[predicted_label] / total_weight
-        
-        # Lấy danh sách khoảng cách
-        distances = [r.score for r in valid_results]
+        predicted_label = round(weighted_label / total_weight)
+        confidence = 1.0 / (1.0 + min(distances))
         
         return predicted_label, confidence, distances
 
 def evaluate_predictions(system, test_samples, k=5, distance_threshold=5.0):
     """Đánh giá độ chính xác của hệ thống trên tập test"""
+    if not system.beacon_order:
+        raise ValueError("Beacon order must be set before evaluation")
+        
     correct_predictions = 0
     total_predictions = 0
     total_confidence = 0
     total_distance = 0
+    detailed_results = []
     
     print(f"\nEvaluating {len(test_samples)} test samples...")
+    print(f"Using beacon order: {system.beacon_order}")
     
     for i, sample in enumerate(test_samples):
-        rssi_values = sample['rssi_values']
+        # Convert RSSI dictionary to list using exact beacon order
+        rssi_dict = sample['rssi_values']
+        rssi_values = [rssi_dict[beacon] for beacon in system.beacon_order]
         true_label = sample['true_label']
         
         predicted_label, confidence, distances = system.predict_location(
@@ -155,24 +207,49 @@ def evaluate_predictions(system, test_samples, k=5, distance_threshold=5.0):
             total_confidence += confidence
             total_distance += sum(distances) / len(distances) if distances else 0
             
+            detailed_results.append({
+                'sample_id': i,
+                'true_label': true_label,
+                'predicted_label': predicted_label,
+                'confidence': confidence,
+                'distances': distances,
+                'is_correct': is_correct,
+                'rssi_values': rssi_dict
+            })
+            
             print(f"\nSample {i}:")
             print(f"True label: {true_label}")
             print(f"Predicted label: {predicted_label}")
             print(f"Confidence: {confidence:.2f}")
             print(f"Distances to neighbors: {distances}")
             print(f"Correct: {is_correct}")
-    
+            
     accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0
     avg_confidence = total_confidence / total_predictions if total_predictions > 0 else 0
     avg_distance = total_distance / total_predictions if total_predictions > 0 else 0
     
-    return {
+    summary_results = {
         'total_predictions': total_predictions,
         'correct_predictions': correct_predictions,
         'accuracy': accuracy,
         'avg_confidence': avg_confidence,
-        'avg_distance': avg_distance
+        'avg_distance': avg_distance,
+        'parameters': {
+            'k': k,
+            'distance_threshold': distance_threshold
+        },
+        'beacon_order': system.beacon_order  # Include beacon order in results
     }
+    
+    results = {
+        'summary': summary_results,
+        'detailed_results': detailed_results
+    }
+    
+    with open('prediction_results.json', 'w') as f:
+        json.dump(results, f, indent=4)
+    
+    return summary_results
 
 def main():
     # Khởi tạo hệ thống
@@ -197,6 +274,7 @@ def main():
     print(f"Accuracy: {results['accuracy']:.2%}")
     print(f"Average confidence: {results['avg_confidence']:.2%}")
     print(f"Average distance: {results['avg_distance']:.2f}")
+    print("\nDetailed results have been saved to 'prediction_results.json'")
 
 if __name__ == "__main__":
     main() 
