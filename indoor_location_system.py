@@ -60,16 +60,16 @@ class IndoorLocationSystem:
         else:
             # If no beacon_order in data, use default order from test data
             self.beacon_order = [
-                "C6:21:3B:AE:36:45",
-                "E2:19:18:C3:B9:B8",
-                "F8:0F:43:E2:80:45",
-                "C2:5B:0A:92:20:41",
-                "C3:79:28:8C:7B:D7",
-                "EA:67:8D:31:27:71",
-                "E6:61:40:67:01:E5",
-                "CE:88:10:2C:58:A2",
-                "C0:23:61:37:E1:2A",
-                "E8:94:83:95:61:E3"
+                  "E2:19:18:C3:B9:B8",
+        "EA:67:8D:31:27:71",
+        "F8:0F:43:E2:80:45",
+        "C0:23:61:37:E1:2A",
+        "CE:88:10:2C:58:A2",
+        "C2:5B:0A:92:20:41",
+        "C6:21:3B:AE:36:45",
+        "E6:61:40:67:01:E5",
+        "E8:94:83:95:61:E3",
+        "C3:79:28:8C:7B:D7"
             ]
             
         return data['X_scaled'], data['y']
